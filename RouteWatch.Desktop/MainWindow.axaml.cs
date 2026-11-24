@@ -17,10 +17,15 @@ public partial class MainWindow : Window
             if (DataContext is not MainViewModel vm) return;
             vm.ChooseExportFileAsync = async name =>
             {
-                var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Export shipments", SuggestedFileName = name, DefaultExtension = "csv" });
+                var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+                {
+                    Title = "Export shipments",
+                    SuggestedFileName = name,
+                    DefaultExtension = "csv"
+                });
                 return file?.TryGetLocalPath();
             };
-            await vm.LoadCommand.ExecuteAsync(null);
+            await vm.InitializeOnStartupAsync();
         };
     }
 

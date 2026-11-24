@@ -10,6 +10,8 @@ public partial class MainViewModel : ObservableObject
     private readonly ShipmentService _service;
     private IReadOnlyList<Shipment> _branch = [];
     private string _loadedBranch = "none";
+    private string? _startupConfigurationError;
+
     [ObservableProperty] private string _baseAddress = "";
     [ObservableProperty] private string _branchCode = "BR-001";
     [ObservableProperty] private string _selectedStatus = "All";
@@ -25,6 +27,7 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private int _exceptionCount;
     [ObservableProperty] private int _visibleCount;
     [ObservableProperty] private bool _hasVisibleShipments;
+
     public ObservableCollection<Shipment> VisibleShipments { get; } = [];
     public string[] StatusOptions { get; } = ["All", .. ShipmentRules.Statuses];
     public IAsyncRelayCommand LoadCommand { get; }
@@ -39,19 +42,69 @@ public partial class MainViewModel : ObservableObject
         RefreshCommand = new AsyncRelayCommand(RefreshAsync, () => !IsBusy);
         ExportCommand = new AsyncRelayCommand(ExportAsync, () => !IsBusy);
     }
-    partial void OnIsBusyChanged(bool value) { LoadCommand.NotifyCanExecuteChanged(); RefreshCommand.NotifyCanExecuteChanged(); ExportCommand.NotifyCanExecuteChanged(); }
+
+    public void SetStartupConfigurationError(string errorMessage)
+    {
+        _startupConfigurationError = errorMessage;
+        Message = errorMessage;
+    }
+
+    public async Task InitializeOnStartupAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            await _service.InitializeAsync();
+            if (ShipmentRules.ValidBranch(BranchCode))
+            {
+                await LoadStoredAsync(BranchCode);
+                if (_startupConfigurationError is null)
+                {
+                    Message = $"Showing saved records for {BranchCode}.";
+                }
+            }
+            else if (_startupConfigurationError is null)
+            {
+                Message = "Enter a valid branch such as BR-001.";
+            }
+        }
+        catch (Exception e)
+        {
+            Message = _startupConfigurationError is null
+                ? $"Could not load saved records: {e.Message}"
+                : $"{_startupConfigurationError} ({e.Message})";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    partial void OnIsBusyChanged(bool value)
+    {
+        LoadCommand.NotifyCanExecuteChanged();
+        RefreshCommand.NotifyCanExecuteChanged();
+        ExportCommand.NotifyCanExecuteChanged();
+    }
+
     partial void OnSelectedStatusChanged(string value) => ApplyFilter();
+
     private void ApplyFilter()
     {
         VisibleShipments.Clear();
         foreach (var s in ShipmentReports.Filter(_branch, SelectedStatus)) VisibleShipments.Add(s);
         var counts = ShipmentReports.Summarize(_branch);
-        TotalCount = counts.Total; PendingCount = counts.Pending; InTransitCount = counts.InTransit;
-        DeliveredCount = counts.Delivered; ExceptionCount = counts.Exception;
-        VisibleCount = VisibleShipments.Count; HasVisibleShipments = VisibleCount > 0;
+        TotalCount = counts.Total;
+        PendingCount = counts.Pending;
+        InTransitCount = counts.InTransit;
+        DeliveredCount = counts.Delivered;
+        ExceptionCount = counts.Exception;
+        VisibleCount = VisibleShipments.Count;
+        HasVisibleShipments = VisibleCount > 0;
         LoadedBranchLabel = _loadedBranch == "none" ? "No branch loaded" : $"Branch {_loadedBranch}";
         Summary = $"Stored {_loadedBranch} total: {counts.Total} | Pending: {counts.Pending} | In transit: {counts.InTransit} | Delivered: {counts.Delivered} | Exception: {counts.Exception}";
     }
+
     private async Task LoadStoredAsync(string branch)
     {
         await _service.InitializeAsync();
@@ -59,42 +112,81 @@ public partial class MainViewModel : ObservableObject
         _loadedBranch = branch;
         ApplyFilter();
     }
+
     private async Task LoadAsync()
     {
         IsBusy = true;
-        try { var branch = BranchCode; await LoadStoredAsync(branch); Message = $"Showing saved records for {branch}."; }
-        catch (Exception e) { Message = $"Could not load saved records: {e.Message}"; }
-        finally { IsBusy = false; }
+        try
+        {
+            var branch = BranchCode;
+            await LoadStoredAsync(branch);
+            Message = $"Showing saved records for {branch}.";
+        }
+        catch (Exception e)
+        {
+            Message = $"Could not load saved records: {e.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
     }
+
     private async Task RefreshAsync()
     {
         IsBusy = true;
+        var address = BaseAddress;
         var branch = BranchCode;
+        var delayTest = UseDelayTestEndpoint;
         try
         {
             await LoadStoredAsync(branch);
-            var delayTest = UseDelayTestEndpoint;
             Message = delayTest ? $"Refreshing {branch} using the 10-second delay test..." : $"Refreshing {branch}...";
-            var count = await _service.RefreshAsync(BaseAddress, branch, useDelayTestEndpoint: delayTest);
+            var count = await _service.RefreshAsync(address, branch, useDelayTestEndpoint: delayTest);
             await LoadStoredAsync(branch);
             Message = $"{(delayTest ? "Delay test" : "Refresh")} succeeded for {branch}: {count} received. Showing saved records.";
         }
-        catch (Exception e) { Message = $"Refresh failed: {e.Message} Showing previously saved records if available."; }
-        finally { IsBusy = false; }
+        catch (Exception e)
+        {
+            Message = $"Refresh failed: {e.Message} Showing previously saved records if available.";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
     }
+
     private async Task ExportAsync()
     {
         IsBusy = true;
         try
         {
-            if (VisibleShipments.Count == 0) { Message = "There are no displayed shipments to export."; return; }
-            if (ChooseExportFileAsync is null) { Message = "Export is unavailable."; return; }
+            if (VisibleShipments.Count == 0)
+            {
+                Message = "There are no displayed shipments to export.";
+                return;
+            }
+            if (ChooseExportFileAsync is null)
+            {
+                Message = "Export is unavailable.";
+                return;
+            }
             var path = await ChooseExportFileAsync("routewatch-shipments.csv");
-            if (path is null) { Message = "Export cancelled."; return; }
+            if (path is null)
+            {
+                Message = "Export cancelled.";
+                return;
+            }
             await File.WriteAllTextAsync(path, ShipmentReports.Csv(VisibleShipments));
             Message = $"Exported {VisibleShipments.Count} displayed shipments.";
         }
-        catch (Exception e) { Message = $"Export failed: {e.Message}"; }
-        finally { IsBusy = false; }
+        catch (Exception e)
+        {
+            Message = $"Export failed: {e.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
     }
 }
